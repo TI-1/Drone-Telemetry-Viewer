@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "server": "nodemon --quiet server",
+    "client": "npm start --prefix client"
+  }
+}
