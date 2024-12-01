@@ -1,6 +1,18 @@
 const { SerialPort } = require('serialport');
-const { MavLinkPacketSplitter, MavLinkPacketParser,  MavLinkPacketRegistry,
-    minimal, common, ardupilotmega } = require('node-mavlink');
+const { MavLinkPacketSplitter, MavLinkPacketParser, minimal, common, 
+    ardupilotmega , send}  = require('node-mavlink');
+const {createParamSetMessage} = require('./utils/MavlinkUtils');
+
+
+
+let pendingParam = null;
+const graphData = [];
+
+const REGISTRY = {
+    ...minimal.REGISTRY,
+    ...common.REGISTRY,
+    ...ardupilotmega.REGISTRY,
+  }
 
 // Function to find the appropriate drone port
 async function findDronePort(portname) {
@@ -44,13 +56,62 @@ async function initialiseSerialPort() {
     });
 }
 
-const graphData = [];
 
-const REGISTRY = {
-    ...minimal.REGISTRY,
-    ...common.REGISTRY,
-    ...ardupilotmega.REGISTRY,
-  }
+function RecieveSerialDataMav(SerialPortInstance, socket){
+    console.log("recieving mavlink data");      
+    const reader = SerialPortInstance.pipe(new MavLinkPacketSplitter()).pipe(new MavLinkPacketParser())
+    console.log("ParserReady");
+    reader.on('data', (packet) => {
+        handleMavlinkMessage(packet,socket)
+        });
+}
+
+const SendParamSet = async (port, paramName, value, callback) => {
+    const targetSystem = 1;
+    const targetComponent = 1;
+    const paramType = 9;
+
+    const paramSetMessage = createParamSetMessage(targetSystem, targetComponent,paramName, value, paramType);
+
+    try{
+        await send(port, paramSetMessage);
+        console.log("Sent PARAM_SET for ${paramName} with value ${value}");
+        const timeout = setTimeout(() => {
+            pendingParam = null;
+            callback(false, "Timeout waiting for PARAM_VALUE.");
+        },5000);
+
+        pendingParam = {
+            paramName,
+            value,
+            callback,
+            timeout,
+        };
+    } catch(err){
+        callback(false, "Failed to send PARAM_SET message.");
+        console.error("Error sending PARAM_SET message: ${err}");
+    }
+};
+
+function handleParamValueResponse(data, socket){
+    if(pendingParam){
+        clearTimeout(pendingParam.timeout);
+
+        const { paramName, value, callback } = pendingParam;
+        pendingParam = null;
+        
+        if(data.paramID == paramName && data.paramValue == value){
+            callback(true);
+        }
+        else{
+            callback(false, 'Value mismatch or write failed');
+        }
+    }
+    socket.emit("ParamValue",{
+        paramName: data.paramID,
+        value: data.paramValue,
+    });
+}
 
 function handleMavlinkMessage(packet, socket){
     const clazz = REGISTRY[packet.header.msgid]
@@ -78,16 +139,10 @@ function handleMavlinkMessage(packet, socket){
         case 0:
             // Need to figure out what I want to do with HeartBeat Data
             console.log(data)
+
+        case 22:
+            handleParamValueResponse(data, socket);
     }
 }
 
-function RecieveSerialDataMav(SerialPortInstance, socket){
-    console.log("recieving mavlink data");      
-    const reader = SerialPortInstance.pipe(new MavLinkPacketSplitter()).pipe(new MavLinkPacketParser())
-    console.log("ParserReady");
-    reader.on('data', (packet) => {
-        handleMavlinkMessage(packet,socket)
-        });
-}
-
-module.exports = {initialiseSerialPort, findDronePort, RecieveSerialDataMav}
+module.exports = {initialiseSerialPort, findDronePort, RecieveSerialDataMav, SendParamSet}
